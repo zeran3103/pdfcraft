@@ -547,7 +547,13 @@ pub(crate) const PREVIEW_BYTES: f64 = 128.0 * 1024.0 * 1024.0;
 /// fill the preview pane (so the picture is not a stretched thumbnail), nearest sheet first and
 /// within [`PREVIEW_MAX_SIDE`] (and `max_side`, the GPU's texture limit) and [`PREVIEW_BYTES`].
 pub(crate) fn preview_rasters(d: &PrintDraft, sizes: &[(f64, f64)], labels: &[String], ppp: f32, max_side: f32) -> Vec<(usize, f32)> {
-    let Ok(settings) = d.settings(sizes.len(), labels) else { return Vec::new() };
+    let mut d_eff = d.clone();
+    if d_eff.source_page_size.is_none() {
+        if let Some(&first) = sizes.get(d_eff.current_page.min(sizes.len().saturating_sub(1))) {
+            d_eff.source_page_size = Some(first);
+        }
+    }
+    let Ok(settings) = d_eff.settings(sizes.len(), labels) else { return Vec::new() };
     let Ok(sheets) = print::layout(sizes, &settings) else { return Vec::new() };
     if sheets.is_empty() {
         return Vec::new();
@@ -664,6 +670,11 @@ pub(crate) fn body(
     thumb: &mut dyn FnMut(usize) -> Option<egui::TextureId>,
 ) -> (bool, bool) {
     if let Some(&first_size) = sizes.get(d.current_page.min(sizes.len().saturating_sub(1))) {
+        if d.source_page_size.is_none() {
+            if let Some(matched) = print::matching_paper(first_size) {
+                d.paper = matched;
+            }
+        }
         d.source_page_size = Some(first_size);
     }
     ui.set_width(820.0);
@@ -1060,20 +1071,16 @@ pub(crate) fn body(
     ui.add_space(10.0);
     let (mut go, mut cancel) = (false, false);
     ui.horizontal(|ui| {
-        let setup_btn = ui.button(tl!("Page Setup…")).on_hover_text(tl!("Choose paper size"));
-        if setup_btn.clicked() {
-            d.show_page_setup = !d.show_page_setup;
-        }
-        if d.show_page_setup {
-            let paper_name = PAPERS.get(d.paper).map_or("US Letter", |p| p.0);
-            egui::ComboBox::from_id_salt("paper-setup-combo").selected_text(paper_name).width(160.0).show_ui(ui, |ui| {
-                for (i, (name, _)) in PAPERS.iter().enumerate() {
-                    if ui.selectable_value(&mut d.paper, i, *name).clicked() {
-                        d.choose_paper_source = false;
-                    }
+        let _ = ui.button(tl!("Page Setup…")).on_hover_text(tl!("Choose paper size"));
+        ui.label(tl!("Paper:"));
+        let paper_name = PAPERS.get(d.paper).map_or("FAKTUR (8.5 x 5.5 in)", |p| p.0);
+        egui::ComboBox::from_id_salt("paper-setup-combo").selected_text(paper_name).width(200.0).show_ui(ui, |ui| {
+            for (i, (name, _)) in PAPERS.iter().enumerate() {
+                if ui.selectable_value(&mut d.paper, i, *name).clicked() {
+                    d.choose_paper_source = false;
                 }
-            });
-        }
+            }
+        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if widgets::pill_button(ui, tl!("Cancel"), false).clicked() {
                 cancel = true;
@@ -1085,7 +1092,6 @@ pub(crate) fn body(
         });
     });
     (go, cancel)
-}
 }
 
 #[cfg(test)]

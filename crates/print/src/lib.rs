@@ -234,9 +234,12 @@ impl Default for Settings {
 }
 
 /// Common paper sizes (points, portrait).
-pub const PAPERS: [(&str, (f64, f64)); 19] = [
+pub const PAPERS: [(&str, (f64, f64)); 22] = [
+    ("FAKTUR (8.5 x 5.5 in)", (396.0, 612.0)),
+    ("Bawaan Printer (FAKTUR 8.5 x 5.5 in)", (396.0, 612.0)),
     ("US Letter", (612.0, 792.0)),
     ("Half Letter (8.5 x 5.5 in)", (396.0, 612.0)),
+    ("Continuous (9.5 x 11 in)", (684.0, 792.0)),
     ("US Legal", (612.0, 1008.0)),
     ("Tabloid", (792.0, 1224.0)),
     ("A3", (841.89, 1190.55)),
