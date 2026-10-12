@@ -234,8 +234,9 @@ impl Default for Settings {
 }
 
 /// Common paper sizes (points, portrait).
-pub const PAPERS: [(&str, (f64, f64)); 18] = [
+pub const PAPERS: [(&str, (f64, f64)); 19] = [
     ("US Letter", (612.0, 792.0)),
+    ("Half Letter (8.5 x 5.5 in)", (396.0, 612.0)),
     ("US Legal", (612.0, 1008.0)),
     ("Tabloid", (792.0, 1224.0)),
     ("A3", (841.89, 1190.55)),

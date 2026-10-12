@@ -78,6 +78,10 @@ pub struct PrintDraft {
     pub show_driver_options: bool,
     /// Why the printer's preferences window didn't open (Windows).
     pub driver_error: Option<String>,
+    pub choose_paper_source: bool,
+    pub save_ink: bool,
+    pub source_page_size: Option<(f64, f64)>,
+    pub show_page_setup: bool,
 }
 
 impl Default for PrintDraft {
@@ -98,7 +102,7 @@ impl Default for PrintDraft {
             subset: Subset::All,
             reverse: false,
             handling: Handling::Size,
-            size: SizeMode::Fit,
+            size: SizeMode::Actual,
             custom_scale: 100.0,
             per_sheet: 2,
             order: PageOrder::Horizontal,
@@ -118,6 +122,10 @@ impl Default for PrintDraft {
             driver_choices: Default::default(),
             show_driver_options: false,
             driver_error: None,
+            choose_paper_source: true,
+            save_ink: false,
+            source_page_size: None,
+            show_page_setup: false,
         }
     }
 }
@@ -156,7 +164,12 @@ impl PrintDraft {
             Handling::Booklet => Layout::Booklet { subset: self.booklet_subset, binding: self.binding },
             Handling::Poster => Layout::Poster { scale: self.poster_scale, overlap: self.overlap, cut_marks: self.cut_marks },
         };
-        Ok(print::Settings { pages, paper: PAPERS[self.paper.min(PAPERS.len() - 1)].1, orientation: self.orientation, layout, content: self.content })
+        let paper = if self.choose_paper_source && let Some(sp) = self.source_page_size {
+            (sp.0.min(sp.1), sp.0.max(sp.1))
+        } else {
+            PAPERS[self.paper.min(PAPERS.len() - 1)].1
+        };
+        Ok(print::Settings { pages, paper, orientation: self.orientation, layout, content: self.content })
     }
 
     pub fn job(&self, title: &str) -> spool::Job {
@@ -245,6 +258,7 @@ impl PdfCraftApp {
         let default = default_printer(&printers);
         let current = self.views[i].current;
         let selected: Vec<usize> = self.views[i].selected.iter().copied().collect();
+        let source_page_size = self.session.get(id).and_then(|doc| doc.info.pages.get(current)).map(|p| (f64::from(p.width), f64::from(p.height)));
         let keep = std::mem::take(&mut self.print_draft);
         // Picked pages are what Print is for (Acrobat's "Selected pages"); without any, a choice
         // left over from another document falls back to the whole document.
@@ -263,6 +277,7 @@ impl PdfCraftApp {
             sheet: 0,
             selected,
             which,
+            source_page_size,
             ..keep
         };
         self.dialog = Some(crate::Dialog::Print);
@@ -648,272 +663,301 @@ pub(crate) fn body(
     labels: &[String],
     thumb: &mut dyn FnMut(usize) -> Option<egui::TextureId>,
 ) -> (bool, bool) {
+    if let Some(&first_size) = sizes.get(d.current_page.min(sizes.len().saturating_sub(1))) {
+        d.source_page_size = Some(first_size);
+    }
     ui.set_width(820.0);
     ui.label(egui::RichText::new(tl!("Print")).font(theme::semibold(18.0)));
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     let settings = d.settings(sizes.len(), labels);
     let sheets = settings.as_ref().ok().and_then(|s| print::layout(sizes, s).ok()).unwrap_or_default();
     d.sheet = d.sheet.min(sheets.len().saturating_sub(1));
+    let browser = d.printer.as_deref() == Some(crate::web_print::BROWSER_PRINTER);
+
     ui.horizontal_top(|ui| {
-        // Settings.
+        // Settings (Left column).
         ui.vertical(|ui| {
             ui.set_width(470.0);
-            egui::Grid::new("print-top").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                ui.label(tl!("Printer:"));
-                let before = d.printer.clone();
-                // The browser's print dialog sets copies, two-sided printing and colour itself.
-                let browser = d.printer.as_deref() == Some(crate::web_print::BROWSER_PRINTER);
-                ui.horizontal(|ui| {
-                    let shown = d.printer.as_deref().map_or_else(|| tl!("Save as PDF").to_string(), printer_label);
-                    egui::ComboBox::from_id_salt("printer").selected_text(shown).width(260.0).show_ui(ui, |ui| {
-                        if d.printers_loading {
-                            ui.add_enabled(false, egui::Label::new(tl!("Looking for printers…")));
-                        }
-                        for p in &d.printers {
-                            let name = printer_label(&p.name);
-                            let label = if p.default && p.name != crate::web_print::BROWSER_PRINTER {
-                                crate::i18n::fmt(tl!("{name} (default)"), &[("name", &name)])
-                            } else {
-                                name
-                            };
-                            ui.selectable_value(&mut d.printer, Some(p.name.clone()), label);
-                        }
-                        ui.selectable_value(&mut d.printer, None, tl!("Save as PDF"));
-                    });
-                    let tip = if spool::HAS_PRINTER_PREFERENCES {
-                        tl!("Opens the printer driver's preferences. They are saved for every print from this computer; the copies, two-sided, grayscale and paper chosen here still apply.")
-                    } else {
-                        tl!("The printer driver's own settings for this print: paper tray, paper type, finishing and more.")
-                    };
-                    let properties = ui.add_enabled(d.printer.is_some() && !browser, egui::Button::new(tl!("Properties…"))).on_hover_text(tip);
-                    if properties.clicked()
-                        && let Some(p) = d.printer.clone()
-                    {
-                        if spool::HAS_PRINTER_PREFERENCES {
-                            d.driver_error = spool::open_printer_preferences(&p).err().map(|e| e.to_string());
+
+            // 1. Printer section
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                egui::Grid::new("print-top-grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                    ui.label(tl!("Printer:"));
+                    let before = d.printer.clone();
+                    ui.horizontal(|ui| {
+                        let shown = d.printer.as_deref().map_or_else(|| tl!("Save as PDF").to_string(), printer_label);
+                        egui::ComboBox::from_id_salt("printer").selected_text(shown).width(200.0).show_ui(ui, |ui| {
+                            if d.printers_loading {
+                                ui.add_enabled(false, egui::Label::new(tl!("Looking for printers…")));
+                            }
+                            for p in &d.printers {
+                                let name = printer_label(&p.name);
+                                let label = if p.default && p.name != crate::web_print::BROWSER_PRINTER {
+                                    crate::i18n::fmt(tl!("{name} (default)"), &[("name", &name)])
+                                } else {
+                                    name
+                                };
+                                ui.selectable_value(&mut d.printer, Some(p.name.clone()), label);
+                            }
+                            ui.selectable_value(&mut d.printer, None, tl!("Save as PDF"));
+                        });
+                        let tip = if spool::HAS_PRINTER_PREFERENCES {
+                            tl!("Opens the printer driver's preferences. They are saved for every print from this computer; the copies, two-sided, grayscale and paper chosen here still apply.")
                         } else {
+                            tl!("The printer driver's own settings for this print: paper tray, paper type, finishing and more.")
+                        };
+                        let properties = ui.add_enabled(d.printer.is_some() && !browser, egui::Button::new(tl!("Properties…"))).on_hover_text(tip);
+                        if properties.clicked()
+                            && let Some(p) = d.printer.clone()
+                        {
+                            if spool::HAS_PRINTER_PREFERENCES {
+                                d.driver_error = spool::open_printer_preferences(&p).err().map(|e| e.to_string());
+                            } else {
+                                if d.driver_options.as_ref().is_none_or(|(read_for, _)| *read_for != p) {
+                                    d.driver_options = Some((p.clone(), spool::printer_options(&p)));
+                                    d.driver_choices.clear();
+                                }
+                                d.show_driver_options = !d.show_driver_options;
+                            }
+                        }
+                        if ui.add_enabled(d.printer.is_some() && !browser, egui::Button::new(tl!("Advanced"))).clicked()
+                            && let Some(p) = d.printer.clone()
+                        {
                             if d.driver_options.as_ref().is_none_or(|(read_for, _)| *read_for != p) {
                                 d.driver_options = Some((p.clone(), spool::printer_options(&p)));
                                 d.driver_choices.clear();
                             }
                             d.show_driver_options = !d.show_driver_options;
                         }
+                    });
+                    if d.printer != before {
+                        d.printer_picked = true;
+                        d.show_driver_options = false;
+                        d.driver_error = None;
+                    }
+                    ui.end_row();
+
+                    ui.label("");
+                    ui.add_enabled_ui(!browser, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(widgets::checkbox(&mut d.grayscale, tl!("Print in grayscale (black and white)")));
+                            ui.add(widgets::checkbox(&mut d.save_ink, tl!("Save ink/toner")));
+                        });
+                    });
+                    ui.end_row();
+
+                    ui.label(tl!("Copies:"));
+                    ui.add_enabled_ui(!browser, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut d.copies).range(1..=999));
+                            ui.add(widgets::checkbox(&mut d.collate, tl!("Collate")));
+                            ui.add_space(8.0);
+                            ui.label(tl!("Two-sided:"));
+                            combo(
+                                ui,
+                                "duplex",
+                                &mut d.duplex,
+                                &[
+                                    (spool::Duplex::Off, tl!("Off")),
+                                    (spool::Duplex::LongEdge, tl!("Flip on long edge")),
+                                    (spool::Duplex::ShortEdge, tl!("Flip on short edge")),
+                                ],
+                                110.0,
+                            );
+                        });
+                    });
+                    ui.end_row();
+                });
+                if let Some(p) = d.printers.iter().find(|p| d.printer.as_ref() == Some(&p.name))
+                    && p.two_sided == Some(false)
+                {
+                    ui.label(egui::RichText::new(tl!("This printer's driver doesn't take two-sided settings from other programs, so its own setting applies. Change it in Properties…")).small().color(t.text_muted));
+                }
+                if d.printer.as_deref() == Some(crate::web_print::BROWSER_PRINTER) {
+                    ui.label(egui::RichText::new(tl!("Copies, two-sided printing and colour are chosen in the browser's print dialog.")).small().color(t.text_muted));
+                }
+                if let Some(e) = &d.driver_error {
+                    ui.label(egui::RichText::new(crate::i18n::fmt(tl!("Couldn't open the printer's preferences: {e}"), &[("e", e)])).small().color(t.text_muted));
+                }
+                if d.show_driver_options {
+                    driver_options_panel(ui, d, t);
+                }
+            });
+
+            // 2. Pages to Print
+            ui.add_space(4.0);
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new(tl!("Pages to Print")).font(theme::semibold(12.5)));
+                ui.horizontal(|ui| {
+                    widgets::radio_value(ui, &mut d.which, Which::All, tl!("All"));
+                    widgets::radio_value(ui, &mut d.which, Which::Current, tl!("Current"));
+                    widgets::radio_value(ui, &mut d.which, Which::Range, tl!("Pages"));
+                    let r = ui.add_enabled(
+                        d.which == Which::Range,
+                        crate::widgets::line(&mut d.range).hint_text(format!("1-{}", sizes.len())).desired_width(100.0),
+                    );
+                    if r.gained_focus() {
+                        d.which = Which::Range;
                     }
                 });
-                if d.printer != before {
-                    d.printer_picked = true;
-                    d.show_driver_options = false;
-                    d.driver_error = None;
+                if !d.selected.is_empty() {
+                    let label = format!("{} ({})", tl!("Selected pages"), d.selected.len());
+                    widgets::radio_value(ui, &mut d.which, Which::Selected, label);
                 }
-                ui.end_row();
-                ui.label(tl!("Copies:"));
-                ui.add_enabled_ui(!browser, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut d.copies).range(1..=999));
-                        ui.add(widgets::checkbox(&mut d.collate, tl!("Collate")));
-                        ui.add(widgets::checkbox(&mut d.grayscale, tl!("Print in grayscale")));
-                    });
-                });
-                ui.end_row();
-                ui.label(tl!("Two-sided:"));
-                ui.add_enabled_ui(!browser, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(tl!("More options:"));
                     combo(
                         ui,
-                        "duplex",
-                        &mut d.duplex,
-                        &[
-                            (spool::Duplex::Off, tl!("Off")),
-                            (spool::Duplex::LongEdge, tl!("Flip on long edge")),
-                            (spool::Duplex::ShortEdge, tl!("Flip on short edge")),
-                        ],
-                        160.0,
+                        "subset",
+                        &mut d.subset,
+                        &[(Subset::All, tl!("All pages in range")), (Subset::Odd, tl!("Odd pages only")), (Subset::Even, tl!("Even pages only"))],
+                        140.0,
                     );
+                    ui.add(widgets::checkbox(&mut d.reverse, tl!("Reverse pages")));
                 });
-                ui.end_row();
-                ui.label(tl!("Paper:"));
-                let paper_name = PAPERS.get(d.paper).map_or("US Letter", |p| p.0);
-                egui::ComboBox::from_id_salt("paper").selected_text(paper_name).width(260.0).show_ui(ui, |ui| {
-                    for (i, (name, _)) in PAPERS.iter().enumerate() {
-                        ui.selectable_value(&mut d.paper, i, *name);
-                    }
-                });
-                ui.end_row();
             });
-            // Windows says which drivers can't print two-sided as they're asked; they keep their
-            // own setting, even when Two-sided is Off.
-            if let Some(p) = d.printers.iter().find(|p| d.printer.as_ref() == Some(&p.name))
-                && p.two_sided == Some(false)
-            {
-                ui.label(egui::RichText::new(tl!("This printer's driver doesn't take two-sided settings from other programs, so its own setting applies. Change it in Properties…")).small().color(t.text_muted));
-            }
-            if d.printer.as_deref() == Some(crate::web_print::BROWSER_PRINTER) {
-                ui.label(egui::RichText::new(tl!("Copies, two-sided printing and colour are chosen in the browser's print dialog.")).small().color(t.text_muted));
-            }
-            if let Some(e) = &d.driver_error {
-                ui.label(egui::RichText::new(crate::i18n::fmt(tl!("Couldn't open the printer's preferences: {e}"), &[("e", e)])).small().color(t.text_muted));
-            }
-            if d.show_driver_options {
-                driver_options_panel(ui, d, t);
-            }
-            if let Some(&source) = sizes.get(d.current_page) {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(crate::i18n::fmt(tl!("PDF page: {size}"), &[("size", &d.units.size(source.0, source.1))]));
-                    let matched = print::matching_paper(source);
-                    if ui.add_enabled(matched.is_some(), egui::Button::new(tl!("Match page at 100%"))).clicked()
-                        && let Some(paper) = matched
-                    {
-                        d.paper = paper;
-                        d.handling = Handling::Size;
-                        d.size = SizeMode::Actual;
-                        d.orientation = Orientation::Auto;
-                        d.sheet = 0;
-                    }
-                });
-            }
-            ui.add_space(6.0);
-            widgets::section_title(ui, tl!("Pages to Print"));
-            ui.horizontal(|ui| {
-                widgets::radio_value(ui, &mut d.which, Which::All, tl!("All"));
-                widgets::radio_value(ui, &mut d.which, Which::Current, tl!("Current page"));
-                widgets::radio_value(ui, &mut d.which, Which::Range, tl!("Pages"));
-                let r = ui.add_enabled(
-                    d.which == Which::Range,
-                    crate::widgets::line(&mut d.range).hint_text(format!("1-{}", sizes.len())).desired_width(110.0),
-                );
-                if r.gained_focus() {
-                    d.which = Which::Range;
-                }
-            });
-            // Offered only when pages were picked before the dialog opened.
-            if !d.selected.is_empty() {
-                let label = format!("{} ({})", tl!("Selected pages"), d.selected.len());
-                widgets::radio_value(ui, &mut d.which, Which::Selected, label);
-            }
-            ui.horizontal(|ui| {
-                ui.label(tl!("More options:"));
-                combo(
-                    ui,
-                    "subset",
-                    &mut d.subset,
-                    &[(Subset::All, tl!("All pages in range")), (Subset::Odd, tl!("Odd pages only")), (Subset::Even, tl!("Even pages only"))],
-                    150.0,
-                );
-                ui.add(widgets::checkbox(&mut d.reverse, tl!("Reverse pages")));
-            });
-            ui.add_space(6.0);
-            widgets::section_title(ui, tl!("Page Sizing & Handling"));
-            ui.horizontal_wrapped(|ui| {
-                for (h, label) in [
-                    (Handling::Size, tl!("Size")),
-                    (Handling::Poster, tl!("Poster")),
-                    (Handling::Multiple, tl!("Multiple")),
-                    (Handling::Booklet, tl!("Booklet")),
-                ] {
-                    if widgets::mode_tab(ui, label, d.handling == h).clicked() {
-                        d.handling = h;
-                        d.sheet = 0;
-                    }
-                }
-            });
+
+            // 3. Page Sizing & Handling
             ui.add_space(4.0);
-            match d.handling {
-                Handling::Size => {
-                    ui.horizontal(|ui| {
-                        widgets::radio_value(ui, &mut d.size, SizeMode::Fit, tl!("Fit"));
-                        widgets::radio_value(ui, &mut d.size, SizeMode::Actual, tl!("Actual size"));
-                        widgets::radio_value(ui, &mut d.size, SizeMode::Shrink, tl!("Shrink oversized pages"));
-                    });
-                    ui.horizontal(|ui| {
-                        let custom = matches!(d.size, SizeMode::Custom(_));
-                        if ui.add(widgets::radio(custom, tl!("Custom scale:"))).clicked() {
-                            d.size = SizeMode::Custom(d.custom_scale);
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new(tl!("Page Sizing & Handling")).font(theme::semibold(12.5)));
+                ui.horizontal_wrapped(|ui| {
+                    for (h, label) in [
+                        (Handling::Size, tl!("Size")),
+                        (Handling::Poster, tl!("Poster")),
+                        (Handling::Multiple, tl!("Multiple")),
+                        (Handling::Booklet, tl!("Booklet")),
+                    ] {
+                        if widgets::mode_tab(ui, label, d.handling == h).clicked() {
+                            d.handling = h;
+                            d.sheet = 0;
                         }
-                        ui.add_enabled(custom, egui::DragValue::new(&mut d.custom_scale).range(1.0..=1000.0).suffix(" %"));
-                    });
-                }
-                Handling::Poster => {
-                    ui.horizontal(|ui| {
-                        ui.label(tl!("Tile scale:"));
-                        ui.add(egui::DragValue::new(&mut d.poster_scale).range(10.0..=1000.0).suffix(" %"));
-                        ui.label(tl!("Overlap:"));
-                        ui.add(egui::DragValue::new(&mut d.overlap).range(0.0..=144.0).suffix(" pt"));
-                        ui.add(widgets::checkbox(&mut d.cut_marks, tl!("Cut marks")));
-                    });
-                }
-                Handling::Multiple => {
-                    ui.horizontal(|ui| {
-                        ui.label(tl!("Pages per sheet:"));
-                        combo(ui, "per-sheet", &mut d.per_sheet, &[(2, "2"), (4, "4"), (6, "6"), (9, "9"), (16, "16")], 60.0);
-                        ui.label(tl!("Page order:"));
-                        combo(
-                            ui,
-                            "order",
-                            &mut d.order,
-                            &[
-                                (PageOrder::Horizontal, tl!("Horizontal")),
-                                (PageOrder::HorizontalReversed, tl!("Horizontal reversed")),
-                                (PageOrder::Vertical, tl!("Vertical")),
-                                (PageOrder::VerticalReversed, tl!("Vertical reversed")),
-                                (PageOrder::CutStack, tl!("Cut and stack")),
-                            ],
-                            150.0,
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.add(widgets::checkbox(&mut d.border, tl!("Print page border")));
-                        ui.add(widgets::checkbox(&mut d.auto_rotate, tl!("Auto-rotate pages")));
-                    });
-                    if d.order == PageOrder::CutStack {
-                        ui.label(tl!(
-                            "Print single-sided. Keep the sheets in order, cut at the marks, then stack the piles left to right, top to bottom."
-                        ));
+                    }
+                });
+                ui.add_space(4.0);
+                match d.handling {
+                    Handling::Size => {
+                        ui.horizontal(|ui| {
+                            widgets::radio_value(ui, &mut d.size, SizeMode::Fit, tl!("Fit"));
+                            widgets::radio_value(ui, &mut d.size, SizeMode::Actual, tl!("Actual size"));
+                            widgets::radio_value(ui, &mut d.size, SizeMode::Shrink, tl!("Shrink oversized pages"));
+                        });
+                        ui.horizontal(|ui| {
+                            let custom = matches!(d.size, SizeMode::Custom(_));
+                            if ui.add(widgets::radio(custom, tl!("Custom scale:"))).clicked() {
+                                d.size = SizeMode::Custom(d.custom_scale);
+                            }
+                            ui.add_enabled(custom, egui::DragValue::new(&mut d.custom_scale).range(1.0..=1000.0).suffix(" %"));
+                        });
+                        ui.add(widgets::checkbox(&mut d.choose_paper_source, tl!("Choose paper source by PDF page size")));
+                    }
+                    Handling::Poster => {
+                        ui.horizontal(|ui| {
+                            ui.label(tl!("Tile scale:"));
+                            ui.add(egui::DragValue::new(&mut d.poster_scale).range(10.0..=1000.0).suffix(" %"));
+                            ui.label(tl!("Overlap:"));
+                            ui.add(egui::DragValue::new(&mut d.overlap).range(0.0..=144.0).suffix(" pt"));
+                            ui.add(widgets::checkbox(&mut d.cut_marks, tl!("Cut marks")));
+                        });
+                    }
+                    Handling::Multiple => {
+                        ui.horizontal(|ui| {
+                            ui.label(tl!("Pages per sheet:"));
+                            combo(ui, "per-sheet", &mut d.per_sheet, &[(2, "2"), (4, "4"), (6, "6"), (9, "9"), (16, "16")], 60.0);
+                            ui.label(tl!("Page order:"));
+                            combo(
+                                ui,
+                                "order",
+                                &mut d.order,
+                                &[
+                                    (PageOrder::Horizontal, tl!("Horizontal")),
+                                    (PageOrder::HorizontalReversed, tl!("Horizontal reversed")),
+                                    (PageOrder::Vertical, tl!("Vertical")),
+                                    (PageOrder::VerticalReversed, tl!("Vertical reversed")),
+                                    (PageOrder::CutStack, tl!("Cut and stack")),
+                                ],
+                                140.0,
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add(widgets::checkbox(&mut d.border, tl!("Print page border")));
+                            ui.add(widgets::checkbox(&mut d.auto_rotate, tl!("Auto-rotate pages")));
+                        });
+                        if d.order == PageOrder::CutStack {
+                            ui.label(tl!(
+                                "Print single-sided. Keep the sheets in order, cut at the marks, then stack the piles left to right, top to bottom."
+                            ));
+                        }
+                    }
+                    Handling::Booklet => {
+                        ui.horizontal(|ui| {
+                            ui.label(tl!("Booklet subset:"));
+                            combo(
+                                ui,
+                                "booklet",
+                                &mut d.booklet_subset,
+                                &[
+                                    (BookletSubset::BothSides, tl!("Both sides")),
+                                    (BookletSubset::FrontOnly, tl!("Front side only")),
+                                    (BookletSubset::BackOnly, tl!("Back side only")),
+                                ],
+                                120.0,
+                            );
+                            ui.label(tl!("Binding:"));
+                            combo(ui, "binding", &mut d.binding, &[(Binding::Left, tl!("Left")), (Binding::Right, tl!("Right"))], 70.0);
+                        });
                     }
                 }
-                Handling::Booklet => {
-                    ui.horizontal(|ui| {
-                        ui.label(tl!("Booklet subset:"));
-                        combo(
-                            ui,
-                            "booklet",
-                            &mut d.booklet_subset,
-                            &[
-                                (BookletSubset::BothSides, tl!("Both sides")),
-                                (BookletSubset::FrontOnly, tl!("Front side only")),
-                                (BookletSubset::BackOnly, tl!("Back side only")),
-                            ],
-                            130.0,
-                        );
-                        ui.label(tl!("Binding:"));
-                        combo(ui, "binding", &mut d.binding, &[(Binding::Left, tl!("Left")), (Binding::Right, tl!("Right"))], 80.0);
-                    });
-                }
-            }
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(tl!("Orientation:"));
-                widgets::radio_value(ui, &mut d.orientation, Orientation::Auto, tl!("Auto portrait/landscape"));
-                widgets::radio_value(ui, &mut d.orientation, Orientation::Portrait, tl!("Portrait"));
-                widgets::radio_value(ui, &mut d.orientation, Orientation::Landscape, tl!("Landscape"));
             });
-            ui.add_space(6.0);
-            widgets::section_title(ui, tl!("Comments & Forms"));
-            combo(
-                ui,
-                "content",
-                &mut d.content,
-                &[
-                    (Content::Document, tl!("Document")),
-                    (Content::DocumentAndMarkups, tl!("Document and markups")),
-                    (Content::DocumentAndStamps, tl!("Document and stamps")),
-                    (Content::FormFieldsOnly, tl!("Form fields only")),
-                ],
-                220.0,
-            );
+
+            // 4. Orientation
+            ui.add_space(4.0);
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Orientation:")).font(theme::semibold(12.5)));
+                    widgets::radio_value(ui, &mut d.orientation, Orientation::Auto, tl!("Auto"));
+                    widgets::radio_value(ui, &mut d.orientation, Orientation::Portrait, tl!("Portrait"));
+                    widgets::radio_value(ui, &mut d.orientation, Orientation::Landscape, tl!("Landscape"));
+                });
+            });
+
+            // 5. Comments & Forms
+            ui.add_space(4.0);
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Comments & Forms")).font(theme::semibold(12.5)));
+                    combo(
+                        ui,
+                        "content",
+                        &mut d.content,
+                        &[
+                            (Content::Document, tl!("Document")),
+                            (Content::DocumentAndMarkups, tl!("Document and Markups")),
+                            (Content::DocumentAndStamps, tl!("Document and stamps")),
+                            (Content::FormFieldsOnly, tl!("Form fields only")),
+                        ],
+                        180.0,
+                    );
+                    if ui.button(tl!("Summarize Comments")).clicked() {}
+                });
+            });
         });
-        ui.add_space(12.0);
-        // Preview.
+
+        ui.add_space(10.0);
+
+        // Preview (Right column).
         ui.vertical(|ui| {
             ui.set_width(PREVIEW_W);
+            if let Some(&source) = sizes.get(d.current_page.min(sizes.len().saturating_sub(1))) {
+                ui.label(egui::RichText::new(crate::i18n::fmt(tl!("Document: {size}"), &[("size", &d.units.size(source.0, source.1))])).font(theme::semibold(12.5)));
+            } else {
+                ui.add_space(18.0);
+            }
             let (area, _) = ui.allocate_exact_size(vec2(PREVIEW_W, PREVIEW_H), egui::Sense::hover());
             ui.painter().rect_filled(area, 6.0, t.hover);
             match (&settings, sheets.get(d.sheet)) {
@@ -983,45 +1027,65 @@ pub(crate) fn body(
             }
             ui.horizontal(|ui| {
                 let n = sheets.len();
-                if ui.add_enabled(d.sheet > 0, egui::Button::new("‹")).on_hover_text(tl!("Previous sheet")).clicked() {
-                    d.sheet -= 1;
+                if ui.add_enabled(d.sheet > 0, egui::Button::new("|<")).on_hover_text(tl!("First sheet")).clicked() {
+                    d.sheet = 0;
+                }
+                if ui.add_enabled(d.sheet > 0, egui::Button::new("<")).on_hover_text(tl!("Previous sheet")).clicked() {
+                    d.sheet = d.sheet.saturating_sub(1);
                 }
                 ui.label(if n == 0 {
-                    tl!("No sheets").to_string()
+                    tl!("0 of 0").to_string()
                 } else {
-                    crate::i18n::fmt(tl!("Sheet {s} of {n}"), &[("s", &(d.sheet + 1).to_string()), ("n", &n.to_string())])
+                    crate::i18n::fmt(tl!("Page {s} of {n}"), &[("s", &(d.sheet + 1).to_string()), ("n", &n.to_string())])
                 });
-                if ui.add_enabled(d.sheet + 1 < n, egui::Button::new("›")).on_hover_text(tl!("Next sheet")).clicked() {
-                    d.sheet += 1;
+                if ui.add_enabled(d.sheet + 1 < n, egui::Button::new(">")).on_hover_text(tl!("Next sheet")).clicked() {
+                    d.sheet = (d.sheet + 1).min(n.saturating_sub(1));
+                }
+                if ui.add_enabled(d.sheet + 1 < n, egui::Button::new(">|")).on_hover_text(tl!("Last sheet")).clicked() {
+                    d.sheet = n.saturating_sub(1);
                 }
             });
             if let Some(s) = sheets.get(d.sheet) {
-                ui.label(egui::RichText::new(d.units.size(s.size.0, s.size.1)).small().color(t.text_muted));
+                ui.label(egui::RichText::new(d.units.size(s.size.0, s.size.1)).font(theme::semibold(12.0)).color(t.text_muted));
                 if d.handling == Handling::Size
                     && let Some(p) = s.placed.first()
                 {
                     let scale = p.matrix.0[0].hypot(p.matrix.0[1]) * 100.0;
                     ui.label(crate::i18n::fmt(tl!("PDF scale: {scale}%"), &[("scale", &format!("{scale:.2}"))]));
-                    ui.label(egui::RichText::new(tl!("Printer paper and scaling may differ. Check driver settings.")).small().color(t.text_muted));
-                    if (scale - 100.0).abs() > 0.01 {
-                        ui.label(egui::RichText::new(tl!("Drawing scale changes. Use Actual size for full-scale plans.")).small().color(t.text_muted));
-                    }
                 }
             }
         });
     });
-    ui.add_space(12.0);
+
+    ui.add_space(10.0);
     let (mut go, mut cancel) = (false, false);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let label = if d.printer.is_some() { "Print" } else { "Save as PDF" };
-        if ui.add_enabled_ui(settings.is_ok() && !sheets.is_empty(), |ui| widgets::pill_button(ui, label, true)).inner.clicked() {
-            go = true;
+    ui.horizontal(|ui| {
+        let setup_btn = ui.button(tl!("Page Setup…")).on_hover_text(tl!("Choose paper size"));
+        if setup_btn.clicked() {
+            d.show_page_setup = !d.show_page_setup;
         }
-        if widgets::pill_button(ui, tl!("Cancel"), false).clicked() {
-            cancel = true;
+        if d.show_page_setup {
+            let paper_name = PAPERS.get(d.paper).map_or("US Letter", |p| p.0);
+            egui::ComboBox::from_id_salt("paper-setup-combo").selected_text(paper_name).width(160.0).show_ui(ui, |ui| {
+                for (i, (name, _)) in PAPERS.iter().enumerate() {
+                    if ui.selectable_value(&mut d.paper, i, *name).clicked() {
+                        d.choose_paper_source = false;
+                    }
+                }
+            });
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if widgets::pill_button(ui, tl!("Cancel"), false).clicked() {
+                cancel = true;
+            }
+            let label = if d.printer.is_some() { tl!("Print") } else { tl!("Save as PDF") };
+            if ui.add_enabled_ui(settings.is_ok() && !sheets.is_empty(), |ui| widgets::pill_button(ui, &label, true)).inner.clicked() {
+                go = true;
+            }
+        });
     });
     (go, cancel)
+}
 }
 
 #[cfg(test)]
