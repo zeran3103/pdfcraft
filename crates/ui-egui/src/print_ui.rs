@@ -245,7 +245,7 @@ fn default_printer(printers: &[spool::Printer]) -> Option<String> {
 
 impl PdfCraftApp {
     pub fn open_print(&mut self) {
-        let Some((i, _)) = self.active_ids() else { return };
+        let Some((i, id)) = self.active_ids() else { return };
         let (printers, printers_loading) = match self.printer_source.clone() {
             // The list from the last time the dialog opened, until the fresh one arrives.
             #[cfg(not(target_arch = "wasm32"))]
@@ -260,6 +260,12 @@ impl PdfCraftApp {
         let selected: Vec<usize> = self.views[i].selected.iter().copied().collect();
         let source_page_size = self.session.get(id).and_then(|doc| doc.info.pages.get(current)).map(|p| (f64::from(p.width), f64::from(p.height)));
         let keep = std::mem::take(&mut self.print_draft);
+        let mut paper = keep.paper;
+        if let Some(sp) = source_page_size {
+            if let Some(matched) = print::matching_paper(sp) {
+                paper = matched;
+            }
+        }
         // Picked pages are what Print is for (Acrobat's "Selected pages"); without any, a choice
         // left over from another document falls back to the whole document.
         let which = match (selected.is_empty(), keep.which) {
@@ -277,6 +283,7 @@ impl PdfCraftApp {
             sheet: 0,
             selected,
             which,
+            paper,
             source_page_size,
             ..keep
         };
