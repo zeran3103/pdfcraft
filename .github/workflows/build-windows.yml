@@ -1,0 +1,33 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Require Windows executable resources
+        run: Add-Content -Path $env:GITHUB_ENV -Value 'PDFCRAFT_REQUIRE_WINRES=1'
+        shell: pwsh
+
+      - name: Build release binary
+        run: cargo build --release -p pdfcraft -p pdfcraft-cli
+        shell: pwsh
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdfcraft-windows-x64
+          path: |
+            target/release/pdfcraft.exe
+            target/release/pdfcraft-cli.exe
