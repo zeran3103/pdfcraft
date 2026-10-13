@@ -235,10 +235,10 @@ impl Default for Settings {
 
 /// Common paper sizes (points, portrait).
 pub const PAPERS: [(&str, (f64, f64)); 22] = [
-    ("FAKTUR (8.5 x 5.5 in)", (396.0, 612.0)),
-    ("Bawaan Printer (FAKTUR 8.5 x 5.5 in)", (396.0, 612.0)),
+    ("FAKTUR (8.5 x 5.5 in)", (612.0, 396.0)),
+    ("Bawaan Printer (FAKTUR 8.5 x 5.5 in)", (612.0, 396.0)),
     ("US Letter", (612.0, 792.0)),
-    ("Half Letter (8.5 x 5.5 in)", (396.0, 612.0)),
+    ("Half Letter (5.5 x 8.5 in)", (396.0, 612.0)),
     ("Continuous (9.5 x 11 in)", (684.0, 792.0)),
     ("US Legal", (612.0, 1008.0)),
     ("Tabloid", (792.0, 1224.0)),
@@ -265,8 +265,8 @@ pub fn matching_paper(size: (f64, f64)) -> Option<usize> {
     if !size.0.is_finite() || !size.1.is_finite() {
         return None;
     }
-    let size = (size.0.min(size.1), size.0.max(size.1));
-    PAPERS.iter().position(|(_, p)| (p.0 - size.0).abs() <= 0.5 && (p.1 - size.1).abs() <= 0.5)
+    let (sw, sh) = (size.0.min(size.1), size.0.max(size.1));
+    PAPERS.iter().position(|(_, p)| (p.0.min(p.1) - sw).abs() <= 0.5 && (p.0.max(p.1) - sh).abs() <= 0.5)
 }
 
 /// The unprintable margin assumed around the sheet for Fit, Multiple and Booklet.
@@ -292,15 +292,15 @@ pub struct Sheet {
 }
 
 fn oriented(paper: (f64, f64), o: Orientation, landscape_wanted: bool) -> (f64, f64) {
-    let (w, h) = (paper.0.min(paper.1), paper.0.max(paper.1));
     match o {
-        Orientation::Portrait => (w, h),
-        Orientation::Landscape => (h, w),
+        Orientation::Portrait => paper,
+        Orientation::Landscape => (paper.1, paper.0),
         Orientation::Auto => {
-            if landscape_wanted {
-                (h, w)
+            let paper_is_landscape = paper.0 > paper.1;
+            if landscape_wanted == paper_is_landscape {
+                paper
             } else {
-                (w, h)
+                (paper.1, paper.0)
             }
         }
     }

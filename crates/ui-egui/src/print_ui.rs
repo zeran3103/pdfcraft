@@ -165,7 +165,7 @@ impl PrintDraft {
             Handling::Poster => Layout::Poster { scale: self.poster_scale, overlap: self.overlap, cut_marks: self.cut_marks },
         };
         let paper = if self.choose_paper_source && let Some(sp) = self.source_page_size {
-            (sp.0.min(sp.1), sp.0.max(sp.1))
+            sp
         } else {
             PAPERS[self.paper.min(PAPERS.len() - 1)].1
         };

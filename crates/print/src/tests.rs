@@ -609,13 +609,32 @@ fn architectural_sheets_preserve_full_scale() {
 
 #[test]
 fn paper_matching_accepts_rounded_metric_sizes_but_not_custom_or_invalid_sizes() {
-    for (i, (_, (w, h))) in PAPERS.iter().enumerate() {
-        assert_eq!(matching_paper((*w, *h)), Some(i));
-        assert_eq!(matching_paper((*h, *w)), Some(i));
-        assert_eq!(matching_paper((w.round(), h.round())), Some(i));
+    for (_, (w, h)) in PAPERS.iter() {
+        let m = matching_paper((*w, *h)).expect("matching paper for standard size");
+        assert!((PAPERS[m].1.0.min(PAPERS[m].1.1) - w.min(*h)).abs() <= 0.5);
+        assert!((PAPERS[m].1.0.max(PAPERS[m].1.1) - w.max(*h)).abs() <= 0.5);
+        let m_rev = matching_paper((*h, *w)).expect("matching paper for transposed size");
+        assert!((PAPERS[m_rev].1.0.min(PAPERS[m_rev].1.1) - w.min(*h)).abs() <= 0.5);
+        let m_round = matching_paper((w.round(), h.round())).expect("matching paper for rounded size");
+        assert!((PAPERS[m_round].1.0.min(PAPERS[m_round].1.1) - w.min(*h)).abs() <= 0.5);
         assert_eq!(matching_paper((w + 0.51, *h)), None);
     }
     for size in [(0.0, 0.0), (-1728.0, 2592.0), (f64::INFINITY, 2592.0), (1728.0, f64::NAN), (1000.0, 1000.0)] {
         assert_eq!(matching_paper(size), None);
     }
+}
+
+#[test]
+fn faktur_paper_portrait_layout_keeps_wide_orientation() {
+    let faktur_index = PAPERS.iter().position(|(name, _)| name.starts_with("FAKTUR")).unwrap();
+    let s = Settings {
+        pages: vec![0],
+        paper: PAPERS[faktur_index].1,
+        orientation: Orientation::Portrait,
+        layout: Layout::Size(SizeMode::Actual),
+        ..Settings::default()
+    };
+    let sheets = layout(&[(612.0, 396.0)], &s).unwrap();
+    assert_eq!(sheets[0].size, (612.0, 396.0));
+    assert_eq!(sheets[0].placed[0].matrix.0, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
 }
