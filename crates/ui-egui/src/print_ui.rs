@@ -1078,7 +1078,9 @@ pub(crate) fn body(
     ui.add_space(10.0);
     let (mut go, mut cancel) = (false, false);
     ui.horizontal(|ui| {
-        let _ = ui.button(tl!("Page Setup…")).on_hover_text(tl!("Choose paper size"));
+        if ui.button(tl!("Page Setup…")).on_hover_text(tl!("Choose paper size and orientation")).clicked() {
+            d.show_page_setup = true;
+        }
         ui.label(tl!("Paper:"));
         let paper_name = PAPERS.get(d.paper).map_or("FAKTUR (8.5 x 5.5 in)", |p| p.0);
         egui::ComboBox::from_id_salt("paper-setup-combo").selected_text(paper_name).width(200.0).show_ui(ui, |ui| {
@@ -1098,6 +1100,80 @@ pub(crate) fn body(
             }
         });
     });
+
+    if d.show_page_setup {
+        let mut close_setup = false;
+        let setup_modal = widgets::show_modal(ui.ctx(), "page_setup_modal", |ui| {
+            ui.set_width(380.0);
+            ui.label(egui::RichText::new(tl!("Page Setup")).font(theme::semibold(16.0)));
+            ui.add_space(8.0);
+
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new(tl!("Paper")).font(theme::semibold(12.5)));
+                ui.add_space(6.0);
+                egui::Grid::new("page-setup-paper-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    ui.label(tl!("Size:"));
+                    let paper_name = PAPERS.get(d.paper).map_or("FAKTUR (8.5 x 5.5 in)", |p| p.0);
+                    egui::ComboBox::from_id_salt("page-setup-size-combo")
+                        .selected_text(paper_name)
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            for (i, (name, _)) in PAPERS.iter().enumerate() {
+                                if ui.selectable_value(&mut d.paper, i, *name).clicked() {
+                                    d.choose_paper_source = false;
+                                }
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label(tl!("Source:"));
+                    let src_name = if d.choose_paper_source { tl!("Automatically Select") } else { tl!("Tractor Feed / Sheet Feeder") };
+                    egui::ComboBox::from_id_salt("page-setup-source-combo")
+                        .selected_text(src_name)
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut d.choose_paper_source, true, tl!("Automatically Select"));
+                            ui.selectable_value(&mut d.choose_paper_source, false, tl!("Tractor Feed / Sheet Feeder"));
+                        });
+                    ui.end_row();
+
+                    if let Some((_, size)) = PAPERS.get(d.paper) {
+                        ui.label(tl!("Dimensions:"));
+                        ui.label(egui::RichText::new(d.units.size(size.0, size.1)).color(t.text_muted));
+                        ui.end_row();
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new(tl!("Orientation")).font(theme::semibold(12.5)));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    widgets::radio_value(ui, &mut d.orientation, Orientation::Portrait, tl!("Portrait"));
+                    ui.add_space(20.0);
+                    widgets::radio_value(ui, &mut d.orientation, Orientation::Landscape, tl!("Landscape"));
+                });
+            });
+
+            ui.add_space(14.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::pill_button(ui, tl!("OK"), true).clicked() {
+                    close_setup = true;
+                }
+                if widgets::pill_button(ui, tl!("Cancel"), false).clicked() {
+                    close_setup = true;
+                }
+            });
+        });
+
+        if close_setup || setup_modal.should_close() {
+            d.show_page_setup = false;
+        }
+    }
     (go, cancel)
 }
 
